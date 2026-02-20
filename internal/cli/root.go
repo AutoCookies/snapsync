@@ -93,7 +93,34 @@ func (r *RootCommand) printHelp() error {
 	return nil
 }
 
+func (r *RootCommand) printSendHelp() error {
+	const msg = `Usage:
+  snapsync send <path> --to <peer-id|host:port> [--timeout 2s] [--name name] [--no-resume]
+`
+	_, err := fmt.Fprint(r.out, msg)
+	return err
+}
+
+func (r *RootCommand) printRecvHelp() error {
+	const msg = `Usage:
+  snapsync recv --listen :45999 --out <dir> [--accept] [--no-discovery] [--no-resume] [--keep-partial] [--force-restart] [--break-lock]
+`
+	_, err := fmt.Fprint(r.out, msg)
+	return err
+}
+
+func (r *RootCommand) printListHelp() error {
+	const msg = `Usage:
+  snapsync list [--timeout 2s] [--json]
+`
+	_, err := fmt.Fprint(r.out, msg)
+	return err
+}
+
 func (r *RootCommand) runSend(args []string) error {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		return r.printSendHelp()
+	}
 	if len(args) == 0 {
 		return fmt.Errorf("send requires a file path argument: %w", apperrors.ErrUsage)
 	}
@@ -103,7 +130,7 @@ func (r *RootCommand) runSend(args []string) error {
 	to := fs.String("to", "", "receiver host:port or peer id")
 	name := fs.String("name", "", "override transfer filename")
 	timeout := fs.Duration("timeout", 2*time.Second, "discovery timeout")
-	resume := fs.Bool("resume", true, "resume interrupted transfers")
+	noResume := fs.Bool("no-resume", false, "disable resume")
 	if err := fs.Parse(args[1:]); err != nil {
 		return fmt.Errorf("parse send flags: %w: %w", err, apperrors.ErrUsage)
 	}
@@ -137,13 +164,16 @@ func (r *RootCommand) runSend(args []string) error {
 		}
 	}
 
-	if err := r.sendFunc(transfer.SenderOptions{Path: path, Address: address, OverrideName: *name, Out: r.out, Resume: *resume}); err != nil {
+	if err := r.sendFunc(transfer.SenderOptions{Path: path, Address: address, OverrideName: *name, Out: r.out, Resume: !*noResume}); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (r *RootCommand) runRecv(args []string) error {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		return r.printRecvHelp()
+	}
 	fs := flag.NewFlagSet("recv", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	listen := fs.String("listen", "", "listen address")
@@ -152,8 +182,10 @@ func (r *RootCommand) runRecv(args []string) error {
 	autoAccept := fs.Bool("accept", false, "automatically accept incoming transfer")
 	alias := fs.String("name", "", "advertised discovery name")
 	noDiscovery := fs.Bool("no-discovery", false, "disable mDNS advertisement")
-	resumeEnabled := fs.Bool("resume", true, "resume interrupted transfers")
+	noResume := fs.Bool("no-resume", false, "disable resume")
 	keepPartial := fs.Bool("keep-partial", false, "keep partial files on failure")
+	forceRestart := fs.Bool("force-restart", false, "force restart when resume session mismatches")
+	breakLock := fs.Bool("break-lock", false, "break existing lock file before receiving")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse recv flags: %w: %w", err, apperrors.ErrUsage)
 	}
@@ -176,14 +208,16 @@ func (r *RootCommand) runRecv(args []string) error {
 	}
 
 	opts := transfer.ReceiverOptions{
-		Listen:      *listen,
-		OutDir:      filepath.Clean(*outDir),
-		Overwrite:   *overwrite,
-		AutoAccept:  *autoAccept,
-		Prompt:      r.promptAccept,
-		Out:         r.out,
-		Resume:      *resumeEnabled,
-		KeepPartial: *keepPartial,
+		Listen:       *listen,
+		OutDir:       filepath.Clean(*outDir),
+		Overwrite:    *overwrite,
+		AutoAccept:   *autoAccept,
+		Prompt:       r.promptAccept,
+		Out:          r.out,
+		Resume:       !*noResume,
+		KeepPartial:  *keepPartial,
+		ForceRestart: *forceRestart,
+		BreakLock:    *breakLock,
 	}
 	if !*noDiscovery {
 		opts.OnListening = func(addr net.Addr) (func(), error) {
@@ -205,6 +239,9 @@ func (r *RootCommand) runRecv(args []string) error {
 }
 
 func (r *RootCommand) runList(args []string) error {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		return r.printListHelp()
+	}
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	timeout := fs.Duration("timeout", 2*time.Second, "discovery timeout")

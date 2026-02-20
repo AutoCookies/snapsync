@@ -14,6 +14,10 @@ var (
 	ErrIO = sterrors.New("io error")
 	// ErrNetwork indicates network connectivity failures.
 	ErrNetwork = sterrors.New("network error")
+	// ErrIntegrity indicates end-to-end integrity failures.
+	ErrIntegrity = sterrors.New("integrity error")
+	// ErrLockBusy indicates output lock contention.
+	ErrLockBusy = sterrors.New("lock busy")
 )
 
 // ExitCode maps an error to a process exit code.
@@ -25,14 +29,16 @@ func ExitCode(err error) int {
 	switch {
 	case sterrors.Is(err, ErrUsage):
 		return 2
-	case sterrors.Is(err, ErrRejected):
+	case sterrors.Is(err, ErrNetwork):
 		return 3
 	case sterrors.Is(err, ErrInvalidProtocol):
 		return 4
-	case sterrors.Is(err, ErrNetwork):
+	case sterrors.Is(err, ErrRejected):
 		return 5
-	case sterrors.Is(err, ErrIO):
+	case sterrors.Is(err, ErrIntegrity):
 		return 6
+	case sterrors.Is(err, ErrLockBusy):
+		return 7
 	default:
 		return 1
 	}

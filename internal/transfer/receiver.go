@@ -18,23 +18,25 @@ import (
 
 const resumeMetaUpdateBytes = 4 * 1024 * 1024
 
-// PromptFunc asks user whether to accept transfer.
+// PromptFunc asks user whether to accept a transfer.
 type PromptFunc func(name string, size uint64, peer string) (bool, error)
 
 // ReceiverOptions configures receiver behavior.
 type ReceiverOptions struct {
-	Listen      string
-	OutDir      string
-	Overwrite   bool
-	AutoAccept  bool
-	Prompt      PromptFunc
-	Out         io.Writer
-	OnListening func(addr net.Addr) (func(), error)
-	Resume      bool
-	KeepPartial bool
+	Listen       string
+	OutDir       string
+	Overwrite    bool
+	AutoAccept   bool
+	Prompt       PromptFunc
+	Out          io.Writer
+	OnListening  func(addr net.Addr) (func(), error)
+	Resume       bool
+	KeepPartial  bool
+	ForceRestart bool
+	BreakLock    bool
 }
 
-// ReceiveOnce listens and handles a single transfer.
+// ReceiveOnce listens and serves one incoming transfer.
 func ReceiveOnce(opts ReceiverOptions) error {
 	if opts.Listen == "" || opts.OutDir == "" {
 		return fmt.Errorf("missing required receiver options: %w", apperrors.ErrUsage)
@@ -68,11 +70,10 @@ func ReceiveOnce(opts ReceiverOptions) error {
 		return fmt.Errorf("accept connection: %w: %w", err, apperrors.ErrNetwork)
 	}
 	defer func() { _ = conn.Close() }()
-
 	return HandleConnection(conn, opts)
 }
 
-// HandleConnection processes one transfer session on accepted connection.
+// HandleConnection serves one accepted connection transfer session.
 func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
@@ -112,9 +113,7 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 		}
 	}
 	if !accept {
-		if err := sendErrorFrame(writer, "transfer rejected"); err != nil {
-			return fmt.Errorf("send reject frame: %w", err)
-		}
+		_ = sendErrorFrame(writer, "transfer rejected")
 		return fmt.Errorf("transfer rejected by receiver: %w", apperrors.ErrRejected)
 	}
 
@@ -123,17 +122,23 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 		_ = sendErrorFrame(writer, "unable to resolve output path")
 		return fmt.Errorf("resolve output paths: %w: %w", err, apperrors.ErrIO)
 	}
-	resumeOffset, err := prepareResumeState(paths, offer, opts.Resume)
+	lock, err := resume.AcquireLock(paths.Lock, offer.SessionID, peer, opts.BreakLock)
 	if err != nil {
-		_ = sendErrorFrame(writer, "unable to prepare resume state")
-		return fmt.Errorf("prepare resume state: %w", err)
+		_ = sendErrorFrame(writer, err.Error())
+		return err
+	}
+	defer lock.Release()
+
+	resumeOffset, err := prepareResumeState(paths, offer, opts)
+	if err != nil {
+		_ = sendErrorFrame(writer, err.Error())
+		return err
 	}
 	if resumeOffset > 0 {
 		_, _ = fmt.Fprintf(opts.Out, "Resuming at offset %d (%.2f%%)\n", resumeOffset, (float64(resumeOffset)/float64(offer.Size))*100)
 	}
 
-	acceptPayload := EncodeAccept(resumeOffset)
-	if err := WriteFrame(writer, Frame{Type: TypeAccept, Payload: acceptPayload}); err != nil {
+	if err := WriteFrame(writer, Frame{Type: TypeAccept, Payload: EncodeAccept(resumeOffset, offer.SessionID)}); err != nil {
 		return fmt.Errorf("send accept frame: %w", err)
 	}
 	if err := writer.Flush(); err != nil {
@@ -142,12 +147,10 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 
 	file, err := os.OpenFile(filepath.Clean(paths.Partial), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		_ = sendErrorFrame(writer, "unable to open partial output file")
 		return fmt.Errorf("open partial output file: %w: %w", err, apperrors.ErrIO)
 	}
 	if _, err := file.Seek(int64(resumeOffset), io.SeekStart); err != nil {
 		_ = file.Close()
-		_ = sendErrorFrame(writer, "unable to seek partial output file")
 		return fmt.Errorf("seek partial output file: %w: %w", err, apperrors.ErrIO)
 	}
 
@@ -161,14 +164,12 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 		}
 	}()
 
-	meta := resume.Meta{ExpectedSize: offer.Size, ReceivedOffset: resumeOffset, OriginalName: offer.Name}
+	meta := resume.Meta{ExpectedSize: offer.Size, ReceivedOffset: resumeOffset, OriginalName: offer.Name, SessionID: offer.SessionID}
 	if err := resume.SaveMetaAtomic(paths.Meta, meta); err != nil {
 		return fmt.Errorf("write initial resume metadata: %w: %w", err, apperrors.ErrIO)
 	}
-
 	hasher, err := hash.New()
 	if err != nil {
-		_ = sendErrorFrame(writer, "receiver hash initialization failed")
 		return fmt.Errorf("create receiver hasher: %w", err)
 	}
 
@@ -181,11 +182,6 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 			preservePartial = true
 			return fmt.Errorf("read data frame: %w: %w", readErr, apperrors.ErrNetwork)
 		}
-		if frame.Type == TypeError {
-			msg, _ := DecodeError(frame.Payload)
-			preservePartial = true
-			return fmt.Errorf("sender reported error: %s: %w", msg, apperrors.ErrNetwork)
-		}
 		if frame.Type != TypeData {
 			_ = sendErrorFrame(writer, "expected DATA frame")
 			return fmt.Errorf("expected DATA frame, got %d: %w", frame.Type, apperrors.ErrInvalidProtocol)
@@ -194,24 +190,17 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 			_ = sendErrorFrame(writer, "received more data than offered")
 			return fmt.Errorf("received more bytes than expected: %w", apperrors.ErrInvalidProtocol)
 		}
-		n, writeErr := file.Write(frame.Payload)
-		if writeErr != nil {
-			_ = sendErrorFrame(writer, "receiver failed writing file")
-			return fmt.Errorf("write output file: %w: %w", writeErr, apperrors.ErrIO)
-		}
-		if n != len(frame.Payload) {
-			_ = sendErrorFrame(writer, "receiver short write")
-			return fmt.Errorf("short write to output file: %w", apperrors.ErrIO)
+		n, werr := file.Write(frame.Payload)
+		if werr != nil || n != len(frame.Payload) {
+			return fmt.Errorf("write output file: %w: %w", werr, apperrors.ErrIO)
 		}
 		if resumeOffset == 0 {
-			if _, err := hasher.Write(frame.Payload[:n]); err != nil {
-				_ = sendErrorFrame(writer, "receiver hash update failed")
+			if _, err := hasher.Write(frame.Payload); err != nil {
 				return fmt.Errorf("hash received chunk: %w", err)
 			}
 		}
 		written += uint64(n)
 		reporter.Update(written)
-
 		if written-lastMetaSync >= resumeMetaUpdateBytes {
 			meta.ReceivedOffset = written
 			if err := resume.SaveMetaAtomic(paths.Meta, meta); err != nil {
@@ -227,34 +216,28 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 
 	done, err := ReadFrame(reader)
 	if err != nil {
-		_ = sendErrorFrame(writer, "missing DONE frame")
 		preservePartial = true
 		return fmt.Errorf("read done frame: %w: %w", err, apperrors.ErrNetwork)
 	}
 	if done.Type != TypeDone {
-		_ = sendErrorFrame(writer, "expected DONE frame")
 		return fmt.Errorf("expected DONE frame, got %d: %w", done.Type, apperrors.ErrInvalidProtocol)
 	}
 	expectedDigest, err := DecodeDone(done.Payload)
 	if err != nil {
-		_ = sendErrorFrame(writer, "invalid DONE payload")
 		return fmt.Errorf("decode done payload: %w", err)
 	}
-
 	var actualDigest []byte
 	if resumeOffset > 0 {
 		actualDigest, err = hashFile(paths.Partial)
 		if err != nil {
-			_ = sendErrorFrame(writer, "integrity rehash failed")
 			return fmt.Errorf("rehash resumed file: %w", err)
 		}
 	} else {
 		actualDigest = hasher.Sum()
 	}
-
 	if subtle.ConstantTimeCompare(expectedDigest, actualDigest) != 1 {
 		_ = sendErrorFrame(writer, "integrity check failed")
-		return fmt.Errorf("integrity check failed expected=%x actual=%x: %w", expectedDigest, actualDigest, apperrors.ErrInvalidProtocol)
+		return fmt.Errorf("integrity check failed: %w", apperrors.ErrIntegrity)
 	}
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("sync output file: %w: %w", err, apperrors.ErrIO)
@@ -270,15 +253,14 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 	return nil
 }
 
-func prepareResumeState(paths resume.Paths, offer OfferPayload, enabled bool) (uint64, error) {
-	if !enabled {
+func prepareResumeState(paths resume.Paths, offer OfferPayload, opts ReceiverOptions) (uint64, error) {
+	if !opts.Resume {
 		_ = os.Remove(paths.Partial)
 		_ = os.Remove(paths.Meta)
 		return 0, nil
 	}
 	partialInfo, partialErr := os.Stat(paths.Partial)
 	meta, metaErr := resume.LoadMeta(paths.Meta)
-
 	if errors.Is(partialErr, os.ErrNotExist) && errors.Is(metaErr, os.ErrNotExist) {
 		return 0, nil
 	}
@@ -287,36 +269,39 @@ func prepareResumeState(paths resume.Paths, offer OfferPayload, enabled bool) (u
 		return 0, nil
 	}
 	if partialErr == nil && errors.Is(metaErr, os.ErrNotExist) {
-		if err := os.Truncate(paths.Partial, 0); err != nil {
-			return 0, fmt.Errorf("truncate partial without metadata: %w", err)
-		}
+		_ = os.Truncate(paths.Partial, 0)
 		return 0, nil
 	}
 	if partialErr != nil {
 		return 0, fmt.Errorf("stat partial file: %w", partialErr)
 	}
 	if metaErr != nil {
-		if err := os.Truncate(paths.Partial, 0); err != nil {
-			return 0, fmt.Errorf("truncate partial with invalid metadata: %w", err)
+		_ = os.Truncate(paths.Partial, 0)
+		_ = os.Remove(paths.Meta)
+		return 0, nil
+	}
+	if meta.SessionID != offer.SessionID {
+		if !opts.ForceRestart {
+			return 0, fmt.Errorf("resume session mismatch: %w", apperrors.ErrRejected)
 		}
+		_ = os.Remove(paths.Partial)
 		_ = os.Remove(paths.Meta)
 		return 0, nil
 	}
 	if meta.ExpectedSize != offer.Size {
-		if err := os.Truncate(paths.Partial, 0); err != nil {
-			return 0, fmt.Errorf("truncate partial on size mismatch: %w", err)
+		if !opts.ForceRestart {
+			return 0, fmt.Errorf("resume size mismatch: %w", apperrors.ErrRejected)
 		}
+		_ = os.Remove(paths.Partial)
 		_ = os.Remove(paths.Meta)
 		return 0, nil
 	}
 	size := uint64(partialInfo.Size())
-	offset := meta.ReceivedOffset
 	if size > offer.Size {
-		if err := os.Truncate(paths.Partial, int64(offer.Size)); err != nil {
-			return 0, fmt.Errorf("truncate oversized partial: %w", err)
-		}
+		_ = os.Truncate(paths.Partial, int64(offer.Size))
 		size = offer.Size
 	}
+	offset := meta.ReceivedOffset
 	if offset > size {
 		offset = size
 	}
@@ -329,23 +314,18 @@ func hashFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("open file for integrity rehash: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	h, err := hash.New()
-	if err != nil {
-		return nil, fmt.Errorf("create file rehash hasher: %w", err)
-	}
+	h, _ := hash.New()
 	buf := make([]byte, MaxChunkSize)
 	for {
-		n, readErr := f.Read(buf)
+		n, rerr := f.Read(buf)
 		if n > 0 {
-			if _, err := h.Write(buf[:n]); err != nil {
-				return nil, fmt.Errorf("hash file content: %w", err)
-			}
+			_, _ = h.Write(buf[:n])
 		}
-		if readErr == io.EOF {
+		if rerr == io.EOF {
 			break
 		}
-		if readErr != nil {
-			return nil, fmt.Errorf("read file content for rehash: %w", readErr)
+		if rerr != nil {
+			return nil, fmt.Errorf("read file for rehash: %w", rerr)
 		}
 	}
 	return h.Sum(), nil
@@ -354,20 +334,15 @@ func hashFile(path string) ([]byte, error) {
 func sendErrorFrame(w *bufio.Writer, message string) error {
 	payload, err := EncodeError(message)
 	if err != nil {
-		return fmt.Errorf("encode error frame payload: %w", err)
+		return err
 	}
 	if err := WriteFrame(w, Frame{Type: TypeError, Payload: payload}); err != nil {
-		return fmt.Errorf("write error frame: %w", err)
+		return err
 	}
-	if err := w.Flush(); err != nil {
-		return fmt.Errorf("flush error frame: %w", err)
-	}
-	return nil
+	return w.Flush()
 }
 
 func sendProtocolError(w *bufio.Writer, message string) error {
-	if err := sendErrorFrame(w, message); err != nil {
-		return fmt.Errorf("send protocol error frame: %w", err)
-	}
+	_ = sendErrorFrame(w, message)
 	return fmt.Errorf("%s: %w", message, apperrors.ErrInvalidProtocol)
 }

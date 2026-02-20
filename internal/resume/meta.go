@@ -17,6 +17,7 @@ type Meta struct {
 	ExpectedSize   uint64 `json:"expected_size"`
 	ReceivedOffset uint64 `json:"received_offset"`
 	OriginalName   string `json:"original_name"`
+	SessionID      string `json:"session_id"`
 }
 
 // LoadMeta loads a metadata file.

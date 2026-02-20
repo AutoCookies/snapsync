@@ -56,6 +56,20 @@ func TestLengthLimitsRespected(t *testing.T) {
 	}
 }
 
+func TestOfferEncodeDecodeIncludesSession(t *testing.T) {
+	p, err := EncodeOffer("x.bin", 42, "0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("EncodeOffer() error = %v", err)
+	}
+	o, err := DecodeOffer(p)
+	if err != nil {
+		t.Fatalf("DecodeOffer() error = %v", err)
+	}
+	if o.SessionID == "" || o.Size != 42 || o.Name != "x.bin" {
+		t.Fatalf("unexpected offer: %#v", o)
+	}
+}
+
 func TestDoneEncodesDecodesRawHash(t *testing.T) {
 	raw := bytes.Repeat([]byte{0xAB}, HashSize)
 	payload, err := EncodeDone(raw)
@@ -83,15 +97,15 @@ func TestDoneRejectsMalformedPayload(t *testing.T) {
 }
 
 func TestAcceptEncodesDecodesResumeOffset(t *testing.T) {
-	payload := EncodeAccept(12345)
-	offset, err := DecodeAccept(payload)
+	payload := EncodeAccept(12345, "0123456789abcdef0123456789abcdef")
+	offset, sid, err := DecodeAccept(payload)
 	if err != nil {
 		t.Fatalf("DecodeAccept() error = %v", err)
 	}
-	if offset != 12345 {
+	if offset != 12345 || sid == "" {
 		t.Fatalf("offset mismatch got %d", offset)
 	}
-	if _, err := DecodeAccept([]byte{1, 2}); err == nil {
+	if _, _, err := DecodeAccept([]byte{1, 2}); err == nil {
 		t.Fatal("expected invalid accept payload failure")
 	}
 }

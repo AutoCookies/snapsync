@@ -145,18 +145,14 @@ func TestResumeRejectMismatchState(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 	_ = WriteFrame(conn, Frame{Type: TypeHello})
-	offer, _ := EncodeOffer("bad.bin", 1024)
+	offer, _ := EncodeOffer("bad.bin", 1024, "11111111111111111111111111111111")
 	_ = WriteFrame(conn, Frame{Type: TypeOffer, Payload: offer})
 	accept, err := ReadFrame(conn)
 	if err != nil {
 		t.Fatalf("ReadFrame(accept) error = %v", err)
 	}
-	offset, err := DecodeAccept(accept.Payload)
-	if err != nil {
-		t.Fatalf("DecodeAccept() error = %v", err)
-	}
-	if offset != 0 {
-		t.Fatalf("expected restart offset 0 on mismatch, got %d", offset)
+	if accept.Type != TypeError {
+		t.Fatalf("expected rejection on size mismatch, got type=%d", accept.Type)
 	}
 	_ = conn.Close()
 	<-done
@@ -238,7 +234,8 @@ func sendPartial(path, addr string, cutoff int64) error {
 	}
 	defer func() { _ = conn.Close() }()
 	_ = WriteFrame(conn, Frame{Type: TypeHello})
-	offer, _ := EncodeOffer(info.Name(), uint64(info.Size()))
+	session, _ := loadOrCreateSessionID(path)
+	offer, _ := EncodeOffer(info.Name(), uint64(info.Size()), session)
 	_ = WriteFrame(conn, Frame{Type: TypeOffer, Payload: offer})
 	accept, err := ReadFrame(conn)
 	if err != nil {
@@ -265,4 +262,76 @@ func sendPartial(path, addr string, cutoff int64) error {
 		}
 	}
 	return nil
+}
+
+func TestLockBusyRejectsSecondSender(t *testing.T) {
+	dstDir := t.TempDir()
+	paths, _ := resume.ResolvePaths(dstDir, "lock.bin", false)
+	_ = os.WriteFile(paths.Lock, []byte("busy"), 0o600)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		conn, _ := ln.Accept()
+		defer func() { _ = conn.Close() }()
+		done <- HandleConnection(conn, ReceiverOptions{OutDir: dstDir, AutoAccept: true, Resume: true, Out: ioDiscard{}})
+	}()
+	conn, _ := net.Dial("tcp", ln.Addr().String())
+	defer func() { _ = conn.Close() }()
+	_ = WriteFrame(conn, Frame{Type: TypeHello})
+	offer, _ := EncodeOffer("lock.bin", 1024, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	_ = WriteFrame(conn, Frame{Type: TypeOffer, Payload: offer})
+	resp, err := ReadFrame(conn)
+	if err != nil || resp.Type != TypeError {
+		t.Fatalf("expected TypeError, frame=%#v err=%v", resp, err)
+	}
+	<-done
+}
+
+func TestSessionMismatchRejectedUnlessForceRestart(t *testing.T) {
+	dstDir := t.TempDir()
+	paths, _ := resume.ResolvePaths(dstDir, "sess.bin", false)
+	_ = os.WriteFile(paths.Partial, bytes.Repeat([]byte("x"), 16), 0o644)
+	_ = resume.SaveMetaAtomic(paths.Meta, resume.Meta{ExpectedSize: 32, ReceivedOffset: 16, OriginalName: "sess.bin", SessionID: "11111111111111111111111111111111"})
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer func() { _ = ln.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		conn, _ := ln.Accept()
+		defer func() { _ = conn.Close() }()
+		done <- HandleConnection(conn, ReceiverOptions{OutDir: dstDir, AutoAccept: true, Resume: true, Out: ioDiscard{}})
+	}()
+	conn, _ := net.Dial("tcp", ln.Addr().String())
+	defer func() { _ = conn.Close() }()
+	_ = WriteFrame(conn, Frame{Type: TypeHello})
+	offer, _ := EncodeOffer("sess.bin", 32, "22222222222222222222222222222222")
+	_ = WriteFrame(conn, Frame{Type: TypeOffer, Payload: offer})
+	resp, _ := ReadFrame(conn)
+	if resp.Type != TypeError {
+		t.Fatalf("expected reject on mismatch")
+	}
+	<-done
+
+	ln2, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer func() { _ = ln2.Close() }()
+	done2 := make(chan error, 1)
+	go func() {
+		conn, _ := ln2.Accept()
+		defer func() { _ = conn.Close() }()
+		done2 <- HandleConnection(conn, ReceiverOptions{OutDir: dstDir, AutoAccept: true, Resume: true, ForceRestart: true, Out: ioDiscard{}})
+	}()
+	conn2, _ := net.Dial("tcp", ln2.Addr().String())
+	defer func() { _ = conn2.Close() }()
+	_ = WriteFrame(conn2, Frame{Type: TypeHello})
+	offer2, _ := EncodeOffer("sess.bin", 32, "33333333333333333333333333333333")
+	_ = WriteFrame(conn2, Frame{Type: TypeOffer, Payload: offer2})
+	accept, _ := ReadFrame(conn2)
+	if accept.Type != TypeAccept {
+		t.Fatalf("expected accept with force restart")
+	}
+	_ = conn2.Close()
+	<-done2
 }

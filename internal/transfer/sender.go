@@ -2,12 +2,15 @@ package transfer
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	apperrors "snapsync/internal/errors"
 	"snapsync/internal/hash"
@@ -39,10 +42,14 @@ func Send(opts SenderOptions) error {
 		return err
 	}
 	defer func() { _ = file.Close() }()
-
 	hasher, err := hash.New()
 	if err != nil {
 		return fmt.Errorf("create sender hasher: %w", err)
+	}
+
+	sessionID, err := loadOrCreateSessionID(opts.Path)
+	if err != nil {
+		return fmt.Errorf("prepare session id: %w", err)
 	}
 
 	conn, err := net.Dial("tcp", opts.Address)
@@ -50,14 +57,13 @@ func Send(opts SenderOptions) error {
 		return fmt.Errorf("dial receiver: %w: %w", err, apperrors.ErrNetwork)
 	}
 	defer func() { _ = conn.Close() }()
-
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 
 	if err := WriteFrame(writer, Frame{Type: TypeHello}); err != nil {
 		return fmt.Errorf("send hello: %w: %w", err, apperrors.ErrNetwork)
 	}
-	offerPayload, err := EncodeOffer(sendName, uint64(info.Size()))
+	offerPayload, err := EncodeOffer(sendName, uint64(info.Size()), sessionID)
 	if err != nil {
 		return fmt.Errorf("encode offer: %w", err)
 	}
@@ -75,15 +81,21 @@ func Send(opts SenderOptions) error {
 	var resumeOffset uint64
 	switch resp.Type {
 	case TypeAccept:
-		decoded, decErr := DecodeAccept(resp.Payload)
+		off, sid, decErr := DecodeAccept(resp.Payload)
 		if decErr != nil {
 			return fmt.Errorf("decode accept frame: %w", decErr)
 		}
-		resumeOffset = decoded
+		if sid != sessionID {
+			return fmt.Errorf("session mismatch receiver=%s sender=%s: %w", sid, sessionID, apperrors.ErrRejected)
+		}
+		resumeOffset = off
 	case TypeError:
 		msg, decErr := DecodeError(resp.Payload)
 		if decErr != nil {
 			return fmt.Errorf("decode receiver error frame: %w", decErr)
+		}
+		if strings.Contains(strings.ToLower(msg), "lock") {
+			return fmt.Errorf("receiver lock busy: %s: %w", msg, apperrors.ErrLockBusy)
 		}
 		return fmt.Errorf("receiver rejected transfer: %s: %w", msg, apperrors.ErrRejected)
 	default:
@@ -96,9 +108,7 @@ func Send(opts SenderOptions) error {
 		return fmt.Errorf("receiver resume offset %d exceeds file size %d: %w", resumeOffset, info.Size(), apperrors.ErrInvalidProtocol)
 	}
 	if resumeOffset > 0 {
-		if _, err := fmt.Fprintf(opts.Out, "Resuming at offset %d (%.2f%%)\n", resumeOffset, (float64(resumeOffset)/float64(info.Size()))*100); err != nil {
-			return fmt.Errorf("write resume output: %w", err)
-		}
+		_, _ = fmt.Fprintf(opts.Out, "Resuming at offset %d (%.2f%%)\n", resumeOffset, (float64(resumeOffset)/float64(info.Size()))*100)
 		if err := hashPrefix(file, resumeOffset, hasher); err != nil {
 			return err
 		}
@@ -151,12 +161,13 @@ func Send(opts SenderOptions) error {
 	status, readErr := ReadFrame(reader)
 	if readErr == nil && status.Type == TypeError {
 		msg, _ := DecodeError(status.Payload)
-		return fmt.Errorf("integrity check failed on receiver: %s: %w", msg, apperrors.ErrRejected)
+		return fmt.Errorf("integrity check failed on receiver: %s: %w", msg, apperrors.ErrIntegrity)
 	}
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
 		return fmt.Errorf("read receiver completion status: %w: %w", readErr, apperrors.ErrNetwork)
 	}
 
+	_ = os.Remove(sessionPath(opts.Path))
 	reporter.Done(sent, sendName)
 	_, _ = fmt.Fprintln(opts.Out, "Transfer complete.")
 	_, _ = fmt.Fprintln(opts.Out, "Integrity verified.")
@@ -206,4 +217,27 @@ func hashPrefix(file *os.File, offset uint64, hasher *hash.Hasher) error {
 		remaining -= uint64(n)
 	}
 	return nil
+}
+
+func sessionPath(sourcePath string) string {
+	return sourcePath + ".snapsync.session"
+}
+
+func loadOrCreateSessionID(sourcePath string) (string, error) {
+	p := sessionPath(sourcePath)
+	if b, err := os.ReadFile(p); err == nil {
+		s := strings.TrimSpace(string(b))
+		if len(s) == 32 {
+			return s, nil
+		}
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate random session id: %w", err)
+	}
+	s := hex.EncodeToString(buf)
+	if err := os.WriteFile(p, []byte(s+"\n"), 0o600); err != nil {
+		return "", fmt.Errorf("write session file: %w", err)
+	}
+	return s, nil
 }

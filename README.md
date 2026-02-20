@@ -1,6 +1,6 @@
 # SnapSync
 
-SnapSync is a LAN file transfer CLI focused on reliable local-network file sending with a simple sender/receiver workflow.
+SnapSync is a LAN file transfer CLI for reliable single-file transfers over TCP with discovery, resume, and end-to-end integrity checks.
 
 ## Requirements
 
@@ -12,58 +12,55 @@ SnapSync is a LAN file transfer CLI focused on reliable local-network file sendi
 make build
 ```
 
-## Test
+## Quick Start (2 machines)
+
+Machine A (receiver):
 
 ```bash
-make test
-make test-race
-make lint
+./bin/snapsync recv --out ./downloads --accept
 ```
 
-## Run
-
-Start a receiver with discovery enabled (default):
-
-```bash
-./bin/snapsync recv --listen :45999 --out ./downloads --accept --name LivingRoomPC
-```
-
-Discover peers on the LAN:
+Machine B (sender):
 
 ```bash
 ./bin/snapsync list --timeout 2s
+./bin/snapsync send ./20GB.iso --to <peer-id>
 ```
 
-Send by discovered peer ID:
+## Commands
 
-```bash
-./bin/snapsync send ./movie.mkv --to a1b2c3d4e5 --timeout 3s
-```
+- `snapsync recv --listen :45999 --out <dir> [--accept] [--overwrite] [--no-discovery] [--no-resume] [--keep-partial] [--force-restart] [--break-lock]`
+- `snapsync list [--timeout 2s] [--json]`
+- `snapsync send <path> --to <peer-id|host:port> [--timeout 2s] [--name <override>] [--no-resume]`
+- `snapsync version`
 
-Direct host:port mode still works:
+## Discovery (Phase 2)
 
-```bash
-./bin/snapsync send ./movie.mkv --to 192.168.1.10:45999
-```
-
-Check version/build metadata:
-
-```bash
-./bin/snapsync version
-```
+Receivers advertise on `_snapsync._tcp.local` while running. `snapsync list` shows discovered peers with ID, name, addresses, port, and age.
 
 ## Integrity Verification (Phase 3)
 
-SnapSync now verifies file integrity using BLAKE3.
+SnapSync verifies transfer integrity before finalizing output.
 
-All transfers are cryptographically validated before completion.
-
-Corrupted files are automatically deleted.
+Corrupted transfers fail and incomplete outputs are removed.
 
 ## Resume Transfers (Phase 4)
 
 If a transfer is interrupted, SnapSync resumes automatically.
 
-Partial transfers are stored as `*.partial` with a small metadata file.
+Partial transfers are stored as `*.partial` with a metadata file `*.partial.snapsync`.
 
-On completion, SnapSync verifies BLAKE3 integrity before finalizing the file.
+On completion, SnapSync verifies integrity before finalizing the file.
+
+## Troubleshooting
+
+- **Discovery not working**: verify both hosts are on same subnet and multicast DNS is allowed by firewall.
+- **Connection failures**: ensure receiver port is open and reachable.
+- **Lock busy errors**: another transfer is using the same target; retry or use `--break-lock` if you are sure it is stale.
+- **Integrity failures**: transfer was corrupted in transit or on disk; rerun send.
+
+## Known Limitations
+
+- No folder transfer yet (files only).
+- No encryption/authentication yet.
+- Discovery is intended for same-subnet LAN environments.
