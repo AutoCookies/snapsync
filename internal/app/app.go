@@ -19,7 +19,7 @@ func New() App {
 
 // Run executes the application and returns a process exit code.
 func (a App) Run(args []string) int {
-	root := cli.NewRootCommand(os.Stdout, os.Stderr)
+	root := cli.NewRootCommand(os.Stdout, os.Stderr, os.Stdin)
 	root.SetArgs(args)
 
 	if err := root.Execute(); err != nil {

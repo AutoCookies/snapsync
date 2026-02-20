@@ -2,29 +2,28 @@ package cli
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
-func TestRootCommandIncludesVersionSubcommand(t *testing.T) {
+func TestRootCommandIncludesRequiredSubcommands(t *testing.T) {
 	buf := &bytes.Buffer{}
-	root := NewRootCommand(buf, buf)
+	root := NewRootCommand(buf, buf, strings.NewReader(""))
 
-	found := false
+	names := map[string]bool{}
 	for _, command := range root.Commands() {
-		if command.Name() == "version" {
-			found = true
-			break
-		}
+		names[command.Name()] = true
 	}
-
-	if !found {
-		t.Fatal("expected root command to include version subcommand")
+	for _, required := range []string{"version", "send", "recv"} {
+		if !names[required] {
+			t.Fatalf("expected root command to include %q subcommand", required)
+		}
 	}
 }
 
 func TestRootCommandHelpReturnsZero(t *testing.T) {
 	buf := &bytes.Buffer{}
-	root := NewRootCommand(buf, buf)
+	root := NewRootCommand(buf, buf, strings.NewReader(""))
 	root.SetArgs([]string{"--help"})
 
 	if err := root.Execute(); err != nil {
