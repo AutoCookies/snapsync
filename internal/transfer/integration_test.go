@@ -2,25 +2,28 @@ package transfer
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestSendReceiveIntegration(t *testing.T) {
+func TestSendReceiveIntegritySuccess(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 	srcPath := filepath.Join(srcDir, "sample.bin")
-	srcData := bytes.Repeat([]byte("0123456789abcdef"), 1024*256) // 4MB
+	srcData := bytes.Repeat([]byte("0123456789abcdef"), 1024*1280) // 20MB
 	if err := os.WriteFile(srcPath, srcData, 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	listenAddr, done := startReceiver(t, dstDir)
-	sendErr := Send(SenderOptions{Path: srcPath, Address: listenAddr, Out: ioDiscard{}})
+	recvOut := &bytes.Buffer{}
+	sendOut := &bytes.Buffer{}
+	listenAddr, done := startReceiver(t, dstDir, recvOut)
+	sendErr := Send(SenderOptions{Path: srcPath, Address: listenAddr, Out: sendOut})
 	recvErr := <-done
 	if sendErr != nil {
 		t.Fatalf("Send() error = %v", sendErr)
@@ -34,11 +37,46 @@ func TestSendReceiveIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(dst) error = %v", err)
 	}
-	if len(got) != len(srcData) {
-		t.Fatalf("size mismatch got %d want %d", len(got), len(srcData))
+	if !bytes.Equal(got, srcData) {
+		t.Fatal("content mismatch")
 	}
-	if sha256.Sum256(got) != sha256.Sum256(srcData) {
-		t.Fatal("content hash mismatch")
+	if !strings.Contains(sendOut.String(), "Integrity verified") {
+		t.Fatalf("expected integrity output on sender, got %q", sendOut.String())
+	}
+	if !strings.Contains(recvOut.String(), "Integrity verified") {
+		t.Fatalf("expected integrity output on receiver, got %q", recvOut.String())
+	}
+}
+
+func TestReceiverDeletesCorruptedFileOnHashMismatch(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	srcPath := filepath.Join(srcDir, "corrupt.bin")
+	srcData := bytes.Repeat([]byte("abcdef0123456789"), 1024*128) // 2MB
+	if err := os.WriteFile(srcPath, srcData, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	prev := senderChunkMutator
+	senderChunkMutator = func(chunk []byte) {
+		if len(chunk) > 0 {
+			chunk[0] ^= 0xFF
+			senderChunkMutator = nil
+		}
+	}
+	defer func() { senderChunkMutator = prev }()
+
+	listenAddr, done := startReceiver(t, dstDir, ioDiscard{})
+	sendErr := Send(SenderOptions{Path: srcPath, Address: listenAddr, Out: ioDiscard{}})
+	recvErr := <-done
+	if sendErr == nil {
+		t.Fatal("expected sender error due integrity failure")
+	}
+	if recvErr == nil {
+		t.Fatal("expected receiver error due integrity failure")
+	}
+	if _, statErr := os.Stat(filepath.Join(dstDir, "corrupt.bin")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected corrupted file removed, stat err=%v", statErr)
 	}
 }
 
@@ -88,7 +126,7 @@ type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }
 
-func startReceiver(t *testing.T, outDir string) (string, <-chan error) {
+func startReceiver(t *testing.T, outDir string, outWriter io.Writer) (string, <-chan error) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -103,7 +141,7 @@ func startReceiver(t *testing.T, outDir string) (string, <-chan error) {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		done <- HandleConnection(conn, ReceiverOptions{OutDir: outDir, AutoAccept: true, Out: ioDiscard{}})
+		done <- HandleConnection(conn, ReceiverOptions{OutDir: outDir, AutoAccept: true, Out: outWriter})
 	}()
 	return ln.Addr().String(), done
 }

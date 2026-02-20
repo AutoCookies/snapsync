@@ -55,3 +55,29 @@ func TestLengthLimitsRespected(t *testing.T) {
 		t.Fatal("expected ReadFrame to reject oversized payload")
 	}
 }
+
+func TestDoneEncodesDecodesRawHash(t *testing.T) {
+	raw := bytes.Repeat([]byte{0xAB}, HashSize)
+	payload, err := EncodeDone(raw)
+	if err != nil {
+		t.Fatalf("EncodeDone() error = %v", err)
+	}
+	got, err := DecodeDone(payload)
+	if err != nil {
+		t.Fatalf("DecodeDone() error = %v", err)
+	}
+	if !bytes.Equal(raw, got) {
+		t.Fatalf("hash mismatch got %x want %x", got, raw)
+	}
+}
+
+func TestDoneRejectsMalformedPayload(t *testing.T) {
+	if _, err := DecodeDone([]byte{}); err == nil {
+		t.Fatal("expected malformed done payload failure")
+	}
+	bad := make([]byte, 2+HashSize)
+	binary.BigEndian.PutUint16(bad[:2], 31)
+	if _, err := DecodeDone(bad); err == nil {
+		t.Fatal("expected invalid hash length failure")
+	}
+}

@@ -51,3 +51,11 @@ Check version/build metadata:
 ```bash
 ./bin/snapsync version
 ```
+
+## Integrity Verification (Phase 3)
+
+SnapSync now verifies file integrity using BLAKE3.
+
+All transfers are cryptographically validated before completion.
+
+Corrupted files are automatically deleted.

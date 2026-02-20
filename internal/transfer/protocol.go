@@ -20,6 +20,8 @@ const (
 	MaxChunkSize = 1024 * 1024
 	// MaxControlPayload limits control frame payload sizes.
 	MaxControlPayload = 4096
+	// HashSize is raw digest bytes carried in DONE.
+	HashSize = 32
 )
 
 const (
@@ -132,6 +134,31 @@ func DecodeOffer(payload []byte) (OfferPayload, error) {
 	return OfferPayload{Name: name, Size: size}, nil
 }
 
+// EncodeDone builds DONE payload with raw hash.
+func EncodeDone(hash []byte) ([]byte, error) {
+	if len(hash) != HashSize {
+		return nil, fmt.Errorf("invalid done hash length: %w", apperrors.ErrInvalidProtocol)
+	}
+	payload := make([]byte, 2+HashSize)
+	binary.BigEndian.PutUint16(payload[:2], uint16(HashSize))
+	copy(payload[2:], hash)
+	return payload, nil
+}
+
+// DecodeDone parses DONE payload raw hash.
+func DecodeDone(payload []byte) ([]byte, error) {
+	if len(payload) != 2+HashSize {
+		return nil, fmt.Errorf("invalid done payload length: %w", apperrors.ErrInvalidProtocol)
+	}
+	hashLen := int(binary.BigEndian.Uint16(payload[:2]))
+	if hashLen != HashSize {
+		return nil, fmt.Errorf("invalid done hash len field: %w", apperrors.ErrInvalidProtocol)
+	}
+	hash := make([]byte, HashSize)
+	copy(hash, payload[2:])
+	return hash, nil
+}
+
 // EncodeError builds ERROR payload.
 func EncodeError(msg string) ([]byte, error) {
 	if len(msg) == 0 || len(msg) > 1024 {
@@ -157,8 +184,10 @@ func DecodeError(payload []byte) (string, error) {
 
 func maxPayloadByType(frameType uint16) int {
 	switch frameType {
-	case TypeHello, TypeAccept, TypeDone:
+	case TypeHello, TypeAccept:
 		return 0
+	case TypeDone:
+		return 2 + HashSize
 	case TypeOffer, TypeError:
 		return MaxControlPayload
 	case TypeData:

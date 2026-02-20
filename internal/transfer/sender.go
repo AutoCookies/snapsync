@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 
 	apperrors "snapsync/internal/errors"
+	"snapsync/internal/hash"
 	"snapsync/internal/progress"
 )
 
@@ -19,6 +21,8 @@ type SenderOptions struct {
 	OverrideName string
 	Out          io.Writer
 }
+
+var senderChunkMutator func([]byte)
 
 // Send streams one file to a receiver.
 func Send(opts SenderOptions) error {
@@ -34,6 +38,11 @@ func Send(opts SenderOptions) error {
 		return err
 	}
 	defer func() { _ = file.Close() }()
+
+	hasher, err := hash.New()
+	if err != nil {
+		return fmt.Errorf("create sender hasher: %w", err)
+	}
 
 	conn, err := net.Dial("tcp", opts.Address)
 	if err != nil {
@@ -80,7 +89,16 @@ func Send(opts SenderOptions) error {
 	for {
 		n, readErr := file.Read(buf)
 		if n > 0 {
-			if err := WriteFrame(writer, Frame{Type: TypeData, Payload: buf[:n]}); err != nil {
+			chunk := buf[:n]
+			if _, err := hasher.Write(chunk); err != nil {
+				return fmt.Errorf("hash source chunk: %w", err)
+			}
+			if senderChunkMutator != nil {
+				mut := append([]byte{}, chunk...)
+				senderChunkMutator(mut)
+				chunk = mut
+			}
+			if err := WriteFrame(writer, Frame{Type: TypeData, Payload: chunk}); err != nil {
 				return fmt.Errorf("send data frame: %w: %w", err, apperrors.ErrNetwork)
 			}
 			sent += uint64(n)
@@ -94,13 +112,31 @@ func Send(opts SenderOptions) error {
 		}
 	}
 
-	if err := WriteFrame(writer, Frame{Type: TypeDone}); err != nil {
+	digest := hasher.Sum()
+	donePayload, err := EncodeDone(digest)
+	if err != nil {
+		return fmt.Errorf("encode done payload: %w", err)
+	}
+	if err := WriteFrame(writer, Frame{Type: TypeDone, Payload: donePayload}); err != nil {
 		return fmt.Errorf("send done frame: %w: %w", err, apperrors.ErrNetwork)
 	}
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("flush transfer frames: %w: %w", err, apperrors.ErrNetwork)
 	}
+
+	status, readErr := ReadFrame(reader)
+	if readErr == nil && status.Type == TypeError {
+		msg, _ := DecodeError(status.Payload)
+		return fmt.Errorf("integrity check failed on receiver: %s: %w", msg, apperrors.ErrRejected)
+	}
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return fmt.Errorf("read receiver completion status: %w: %w", readErr, apperrors.ErrNetwork)
+	}
+
 	reporter.Done(sent, sendName)
+	_, _ = fmt.Fprintln(opts.Out, "Transfer complete.")
+	_, _ = fmt.Fprintln(opts.Out, "Integrity verified.")
+	_, _ = fmt.Fprintf(opts.Out, "blake3: %s\n", hasher.SumHex())
 	return nil
 }
 

@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 
 	apperrors "snapsync/internal/errors"
+	"snapsync/internal/hash"
 	"snapsync/internal/progress"
 	"snapsync/internal/sanitize"
 )
@@ -131,6 +133,12 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 		return fmt.Errorf("open output file: %w: %w", err, apperrors.ErrIO)
 	}
 
+	hasher, err := hash.New()
+	if err != nil {
+		_ = sendErrorFrame(writer, "receiver hash initialization failed")
+		return fmt.Errorf("create receiver hasher: %w", err)
+	}
+
 	cleanup := true
 	defer func() {
 		_ = file.Close()
@@ -167,6 +175,10 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 			_ = sendErrorFrame(writer, "receiver short write")
 			return fmt.Errorf("short write to output file: %w", apperrors.ErrIO)
 		}
+		if _, err := hasher.Write(frame.Payload[:n]); err != nil {
+			_ = sendErrorFrame(writer, "receiver hash update failed")
+			return fmt.Errorf("hash received chunk: %w", err)
+		}
 		written += uint64(n)
 		reporter.Update(written)
 	}
@@ -180,11 +192,24 @@ func HandleConnection(conn net.Conn, opts ReceiverOptions) error {
 		_ = sendErrorFrame(writer, "expected DONE frame")
 		return fmt.Errorf("expected DONE frame, got %d: %w", done.Type, apperrors.ErrInvalidProtocol)
 	}
+	expectedDigest, err := DecodeDone(done.Payload)
+	if err != nil {
+		_ = sendErrorFrame(writer, "invalid DONE payload")
+		return fmt.Errorf("decode done payload: %w", err)
+	}
+	actualDigest := hasher.Sum()
+	if subtle.ConstantTimeCompare(expectedDigest, actualDigest) != 1 {
+		_ = sendErrorFrame(writer, "integrity check failed")
+		return fmt.Errorf("integrity check failed expected=%x actual=%x: %w", expectedDigest, actualDigest, apperrors.ErrInvalidProtocol)
+	}
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("sync output file: %w: %w", err, apperrors.ErrIO)
 	}
 	cleanup = false
 	reporter.Done(written, outPath)
+	_, _ = fmt.Fprintln(opts.Out, "Transfer complete.")
+	_, _ = fmt.Fprintln(opts.Out, "Integrity verified.")
+	_, _ = fmt.Fprintf(opts.Out, "blake3: %x\n", actualDigest)
 	return nil
 }
 
