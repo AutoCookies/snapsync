@@ -3,14 +3,19 @@ package cli
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"snapsync/internal/discovery"
 	apperrors "snapsync/internal/errors"
 	"snapsync/internal/transfer"
 )
@@ -31,15 +36,18 @@ type RootCommand struct {
 	in       io.Reader
 	commands []Command
 	args     []string
+	resolver discovery.Resolver
+	sendFunc func(transfer.SenderOptions) error
 }
 
 // NewRootCommand creates the SnapSync root command.
 func NewRootCommand(out io.Writer, errOut io.Writer, in io.Reader) *RootCommand {
-	root := &RootCommand{out: out, errOut: errOut, in: in}
+	root := &RootCommand{out: out, errOut: errOut, in: in, resolver: discovery.MDNSResolver{}, sendFunc: transfer.Send}
 	root.commands = []Command{
 		NewVersionCommand(out),
 		{name: "send", run: root.runSend},
 		{name: "recv", run: root.runRecv},
+		{name: "list", run: root.runList},
 	}
 	return root
 }
@@ -64,6 +72,8 @@ func (r *RootCommand) Execute() error {
 		return r.commands[1].run(r.args[1:])
 	case "recv":
 		return r.commands[2].run(r.args[1:])
+	case "list":
+		return r.commands[3].run(r.args[1:])
 	default:
 		if _, err := fmt.Fprintf(r.errOut, "unknown command %q\n", r.args[0]); err != nil {
 			return fmt.Errorf("write unknown command error: %w", err)
@@ -76,7 +86,7 @@ func (r *RootCommand) Execute() error {
 }
 
 func (r *RootCommand) printHelp() error {
-	const help = "SnapSync is a LAN file transfer tool\n\nUsage:\n  snapsync [command]\n\nAvailable Commands:\n  recv     Receive a file over TCP\n  send     Send a file over TCP\n  version  Print version information\n\nFlags:\n  -h, --help  help for snapsync\n"
+	const help = "SnapSync is a LAN file transfer tool\n\nUsage:\n  snapsync [command]\n\nAvailable Commands:\n  list     List discovered peers\n  recv     Receive a file over TCP\n  send     Send a file over TCP\n  version  Print version information\n\nFlags:\n  -h, --help  help for snapsync\n"
 	if _, err := fmt.Fprint(r.out, help); err != nil {
 		return fmt.Errorf("write help output: %w", err)
 	}
@@ -84,22 +94,49 @@ func (r *RootCommand) printHelp() error {
 }
 
 func (r *RootCommand) runSend(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("send requires a file path argument: %w", apperrors.ErrUsage)
+	}
+	path := filepath.Clean(args[0])
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	to := fs.String("to", "", "receiver host:port")
+	to := fs.String("to", "", "receiver host:port or peer id")
 	name := fs.String("name", "", "override transfer filename")
-	if err := fs.Parse(args); err != nil {
+	timeout := fs.Duration("timeout", 2*time.Second, "discovery timeout")
+	if err := fs.Parse(args[1:]); err != nil {
 		return fmt.Errorf("parse send flags: %w: %w", err, apperrors.ErrUsage)
 	}
-	remaining := fs.Args()
-	if len(remaining) != 1 {
-		return fmt.Errorf("send requires exactly one file path argument: %w", apperrors.ErrUsage)
+	if len(fs.Args()) > 0 {
+		return fmt.Errorf("send accepts one path followed by flags: %w", apperrors.ErrUsage)
 	}
 	if *to == "" {
-		return fmt.Errorf("send requires --to host:port: %w", apperrors.ErrUsage)
+		return fmt.Errorf("send requires --to: %w", apperrors.ErrUsage)
 	}
-	path := filepath.Clean(remaining[0])
-	if err := transfer.Send(transfer.SenderOptions{Path: path, Address: *to, OverrideName: *name, Out: r.out}); err != nil {
+
+	address := *to
+	if !strings.Contains(*to, ":") {
+		peer, err := r.resolver.Browse(context.Background(), *timeout)
+		if err != nil {
+			return fmt.Errorf("discover peers: %w", err)
+		}
+		found := false
+		for _, p := range peer {
+			if p.ID == *to {
+				best := p.PreferredAddress()
+				if best == "" {
+					return fmt.Errorf("peer %q has no usable address: %w", p.ID, apperrors.ErrNetwork)
+				}
+				address = net.JoinHostPort(best, fmt.Sprintf("%d", p.Port))
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("peer id %q not found: %w", *to, apperrors.ErrNetwork)
+		}
+	}
+
+	if err := r.sendFunc(transfer.SenderOptions{Path: path, Address: address, OverrideName: *name, Out: r.out}); err != nil {
 		return err
 	}
 	return nil
@@ -112,12 +149,29 @@ func (r *RootCommand) runRecv(args []string) error {
 	outDir := fs.String("out", "", "output directory")
 	overwrite := fs.Bool("overwrite", false, "overwrite existing file")
 	autoAccept := fs.Bool("accept", false, "automatically accept incoming transfer")
+	alias := fs.String("name", "", "advertised discovery name")
+	noDiscovery := fs.Bool("no-discovery", false, "disable mDNS advertisement")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse recv flags: %w: %w", err, apperrors.ErrUsage)
 	}
 	if *listen == "" || *outDir == "" {
 		return fmt.Errorf("recv requires --listen and --out: %w", apperrors.ErrUsage)
 	}
+
+	peerID, err := discovery.LocalPeerID()
+	if err != nil {
+		return fmt.Errorf("load local peer id: %w", err)
+	}
+	display := *alias
+	if display == "" {
+		h, _ := os.Hostname()
+		display = h
+	}
+	instance := display
+	if instance == "" {
+		instance = "snapsync"
+	}
+
 	opts := transfer.ReceiverOptions{
 		Listen:     *listen,
 		OutDir:     filepath.Clean(*outDir),
@@ -126,8 +180,55 @@ func (r *RootCommand) runRecv(args []string) error {
 		Prompt:     r.promptAccept,
 		Out:        r.out,
 	}
+	if !*noDiscovery {
+		opts.OnListening = func(addr net.Addr) (func(), error) {
+			port := 0
+			if tcp, ok := addr.(*net.TCPAddr); ok {
+				port = tcp.Port
+			}
+			adv, advErr := discovery.StartAdvertise(discovery.AdvertiseConfig{InstanceName: instance, PeerID: peerID, DisplayName: display, Port: port})
+			if advErr != nil {
+				return nil, fmt.Errorf("start discovery advertisement: %w", advErr)
+			}
+			return adv.Stop, nil
+		}
+	}
 	if err := transfer.ReceiveOnce(opts); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (r *RootCommand) runList(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	timeout := fs.Duration("timeout", 2*time.Second, "discovery timeout")
+	jsonOut := fs.Bool("json", false, "print peers as NDJSON")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse list flags: %w: %w", err, apperrors.ErrUsage)
+	}
+	peers, err := r.resolver.Browse(context.Background(), *timeout)
+	if err != nil {
+		return fmt.Errorf("browse peers: %w", err)
+	}
+	if *jsonOut {
+		enc := json.NewEncoder(r.out)
+		for _, p := range peers {
+			if err := enc.Encode(p); err != nil {
+				return fmt.Errorf("encode peer output: %w", err)
+			}
+		}
+		return nil
+	}
+	if _, err := fmt.Fprintln(r.out, "ID           NAME          ADDRESSES              PORT  AGE"); err != nil {
+		return fmt.Errorf("write list header: %w", err)
+	}
+	now := time.Now()
+	for _, p := range peers {
+		age := now.Sub(p.LastSeen).Truncate(100 * time.Millisecond)
+		if _, err := fmt.Fprintf(r.out, "%-12s %-13s %-22s %-5d %s\n", p.ID, p.Name, strings.Join(p.Addresses, ", "), p.Port, age); err != nil {
+			return fmt.Errorf("write list row: %w", err)
+		}
 	}
 	return nil
 }

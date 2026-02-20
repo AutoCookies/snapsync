@@ -22,16 +22,28 @@ make lint
 
 ## Run
 
-Start a receiver:
+Start a receiver with discovery enabled (default):
 
 ```bash
-./bin/snapsync recv --listen :45999 --out ./downloads --accept
+./bin/snapsync recv --listen :45999 --out ./downloads --accept --name LivingRoomPC
 ```
 
-Send a file:
+Discover peers on the LAN:
 
 ```bash
-./bin/snapsync send ./big.iso --to 192.168.1.10:45999
+./bin/snapsync list --timeout 2s
+```
+
+Send by discovered peer ID:
+
+```bash
+./bin/snapsync send ./movie.mkv --to a1b2c3d4e5 --timeout 3s
+```
+
+Direct host:port mode still works:
+
+```bash
+./bin/snapsync send ./movie.mkv --to 192.168.1.10:45999
 ```
 
 Check version/build metadata:

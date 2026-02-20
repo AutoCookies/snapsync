@@ -14,7 +14,7 @@ func TestRootCommandIncludesRequiredSubcommands(t *testing.T) {
 	for _, command := range root.Commands() {
 		names[command.Name()] = true
 	}
-	for _, required := range []string{"version", "send", "recv"} {
+	for _, required := range []string{"version", "send", "recv", "list"} {
 		if !names[required] {
 			t.Fatalf("expected root command to include %q subcommand", required)
 		}

@@ -18,12 +18,13 @@ type PromptFunc func(name string, size uint64, peer string) (bool, error)
 
 // ReceiverOptions configures receiver behavior.
 type ReceiverOptions struct {
-	Listen     string
-	OutDir     string
-	Overwrite  bool
-	AutoAccept bool
-	Prompt     PromptFunc
-	Out        io.Writer
+	Listen      string
+	OutDir      string
+	Overwrite   bool
+	AutoAccept  bool
+	Prompt      PromptFunc
+	Out         io.Writer
+	OnListening func(addr net.Addr) (func(), error)
 }
 
 // ReceiveOnce listens and handles a single transfer.
@@ -43,6 +44,17 @@ func ReceiveOnce(opts ReceiverOptions) error {
 		return fmt.Errorf("listen on %s: %w: %w", opts.Listen, err, apperrors.ErrNetwork)
 	}
 	defer func() { _ = ln.Close() }()
+	var stopAdvertise func()
+	if opts.OnListening != nil {
+		cleanup, cbErr := opts.OnListening(ln.Addr())
+		if cbErr != nil {
+			return fmt.Errorf("receiver on-listening callback: %w", cbErr)
+		}
+		stopAdvertise = cleanup
+	}
+	if stopAdvertise != nil {
+		defer stopAdvertise()
+	}
 	_, _ = fmt.Fprintf(opts.Out, "listening on %s\n", ln.Addr().String())
 
 	conn, err := ln.Accept()
