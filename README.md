@@ -59,3 +59,11 @@ SnapSync now verifies file integrity using BLAKE3.
 All transfers are cryptographically validated before completion.
 
 Corrupted files are automatically deleted.
+
+## Resume Transfers (Phase 4)
+
+If a transfer is interrupted, SnapSync resumes automatically.
+
+Partial transfers are stored as `*.partial` with a small metadata file.
+
+On completion, SnapSync verifies BLAKE3 integrity before finalizing the file.

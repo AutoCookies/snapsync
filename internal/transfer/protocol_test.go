@@ -81,3 +81,17 @@ func TestDoneRejectsMalformedPayload(t *testing.T) {
 		t.Fatal("expected invalid hash length failure")
 	}
 }
+
+func TestAcceptEncodesDecodesResumeOffset(t *testing.T) {
+	payload := EncodeAccept(12345)
+	offset, err := DecodeAccept(payload)
+	if err != nil {
+		t.Fatalf("DecodeAccept() error = %v", err)
+	}
+	if offset != 12345 {
+		t.Fatalf("offset mismatch got %d", offset)
+	}
+	if _, err := DecodeAccept([]byte{1, 2}); err == nil {
+		t.Fatal("expected invalid accept payload failure")
+	}
+}

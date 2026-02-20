@@ -103,6 +103,7 @@ func (r *RootCommand) runSend(args []string) error {
 	to := fs.String("to", "", "receiver host:port or peer id")
 	name := fs.String("name", "", "override transfer filename")
 	timeout := fs.Duration("timeout", 2*time.Second, "discovery timeout")
+	resume := fs.Bool("resume", true, "resume interrupted transfers")
 	if err := fs.Parse(args[1:]); err != nil {
 		return fmt.Errorf("parse send flags: %w: %w", err, apperrors.ErrUsage)
 	}
@@ -136,7 +137,7 @@ func (r *RootCommand) runSend(args []string) error {
 		}
 	}
 
-	if err := r.sendFunc(transfer.SenderOptions{Path: path, Address: address, OverrideName: *name, Out: r.out}); err != nil {
+	if err := r.sendFunc(transfer.SenderOptions{Path: path, Address: address, OverrideName: *name, Out: r.out, Resume: *resume}); err != nil {
 		return err
 	}
 	return nil
@@ -151,6 +152,8 @@ func (r *RootCommand) runRecv(args []string) error {
 	autoAccept := fs.Bool("accept", false, "automatically accept incoming transfer")
 	alias := fs.String("name", "", "advertised discovery name")
 	noDiscovery := fs.Bool("no-discovery", false, "disable mDNS advertisement")
+	resumeEnabled := fs.Bool("resume", true, "resume interrupted transfers")
+	keepPartial := fs.Bool("keep-partial", false, "keep partial files on failure")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse recv flags: %w: %w", err, apperrors.ErrUsage)
 	}
@@ -173,12 +176,14 @@ func (r *RootCommand) runRecv(args []string) error {
 	}
 
 	opts := transfer.ReceiverOptions{
-		Listen:     *listen,
-		OutDir:     filepath.Clean(*outDir),
-		Overwrite:  *overwrite,
-		AutoAccept: *autoAccept,
-		Prompt:     r.promptAccept,
-		Out:        r.out,
+		Listen:      *listen,
+		OutDir:      filepath.Clean(*outDir),
+		Overwrite:   *overwrite,
+		AutoAccept:  *autoAccept,
+		Prompt:      r.promptAccept,
+		Out:         r.out,
+		Resume:      *resumeEnabled,
+		KeepPartial: *keepPartial,
 	}
 	if !*noDiscovery {
 		opts.OnListening = func(addr net.Addr) (func(), error) {

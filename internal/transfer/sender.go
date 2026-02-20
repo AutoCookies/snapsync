@@ -20,6 +20,7 @@ type SenderOptions struct {
 	Address      string
 	OverrideName string
 	Out          io.Writer
+	Resume       bool
 }
 
 var senderChunkMutator func([]byte)
@@ -71,8 +72,14 @@ func Send(opts SenderOptions) error {
 	if err != nil {
 		return fmt.Errorf("read receiver response: %w: %w", err, apperrors.ErrNetwork)
 	}
+	var resumeOffset uint64
 	switch resp.Type {
 	case TypeAccept:
+		decoded, decErr := DecodeAccept(resp.Payload)
+		if decErr != nil {
+			return fmt.Errorf("decode accept frame: %w", decErr)
+		}
+		resumeOffset = decoded
 	case TypeError:
 		msg, decErr := DecodeError(resp.Payload)
 		if decErr != nil {
@@ -82,10 +89,27 @@ func Send(opts SenderOptions) error {
 	default:
 		return fmt.Errorf("unexpected response frame type %d: %w", resp.Type, apperrors.ErrInvalidProtocol)
 	}
+	if !opts.Resume {
+		resumeOffset = 0
+	}
+	if resumeOffset > uint64(info.Size()) {
+		return fmt.Errorf("receiver resume offset %d exceeds file size %d: %w", resumeOffset, info.Size(), apperrors.ErrInvalidProtocol)
+	}
+	if resumeOffset > 0 {
+		if _, err := fmt.Fprintf(opts.Out, "Resuming at offset %d (%.2f%%)\n", resumeOffset, (float64(resumeOffset)/float64(info.Size()))*100); err != nil {
+			return fmt.Errorf("write resume output: %w", err)
+		}
+		if err := hashPrefix(file, resumeOffset, hasher); err != nil {
+			return err
+		}
+	}
+	if _, err := file.Seek(int64(resumeOffset), io.SeekStart); err != nil {
+		return fmt.Errorf("seek source file for resume: %w: %w", err, apperrors.ErrIO)
+	}
 
 	reporter := progress.NewReporter(opts.Out, "sending", uint64(info.Size()))
 	buf := make([]byte, MaxChunkSize)
-	var sent uint64
+	sent := resumeOffset
 	for {
 		n, readErr := file.Read(buf)
 		if n > 0 {
@@ -159,4 +183,27 @@ func openSource(path, overrideName string) (*os.File, os.FileInfo, string, error
 		name = overrideName
 	}
 	return file, info, name, nil
+}
+
+func hashPrefix(file *os.File, offset uint64, hasher *hash.Hasher) error {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek file for prefix hash: %w: %w", err, apperrors.ErrIO)
+	}
+	buf := make([]byte, MaxChunkSize)
+	remaining := offset
+	for remaining > 0 {
+		toRead := len(buf)
+		if uint64(toRead) > remaining {
+			toRead = int(remaining)
+		}
+		n, err := io.ReadFull(file, buf[:toRead])
+		if err != nil {
+			return fmt.Errorf("read prefix for resume hash: %w: %w", err, apperrors.ErrIO)
+		}
+		if _, err := hasher.Write(buf[:n]); err != nil {
+			return fmt.Errorf("hash prefix bytes: %w", err)
+		}
+		remaining -= uint64(n)
+	}
+	return nil
 }

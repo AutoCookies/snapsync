@@ -29,7 +29,7 @@ const (
 	TypeHello uint16 = 1
 	// TypeOffer announces file name and size.
 	TypeOffer uint16 = 2
-	// TypeAccept accepts offered transfer.
+	// TypeAccept accepts offered transfer and may include resume offset.
 	TypeAccept uint16 = 3
 	// TypeData carries file bytes.
 	TypeData uint16 = 4
@@ -134,6 +134,21 @@ func DecodeOffer(payload []byte) (OfferPayload, error) {
 	return OfferPayload{Name: name, Size: size}, nil
 }
 
+// EncodeAccept builds ACCEPT payload containing resume offset.
+func EncodeAccept(offset uint64) []byte {
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint64(payload, offset)
+	return payload
+}
+
+// DecodeAccept parses ACCEPT payload into resume offset.
+func DecodeAccept(payload []byte) (uint64, error) {
+	if len(payload) != 8 {
+		return 0, fmt.Errorf("invalid accept payload length: %w", apperrors.ErrInvalidProtocol)
+	}
+	return binary.BigEndian.Uint64(payload), nil
+}
+
 // EncodeDone builds DONE payload with raw hash.
 func EncodeDone(hash []byte) ([]byte, error) {
 	if len(hash) != HashSize {
@@ -184,8 +199,10 @@ func DecodeError(payload []byte) (string, error) {
 
 func maxPayloadByType(frameType uint16) int {
 	switch frameType {
-	case TypeHello, TypeAccept:
+	case TypeHello:
 		return 0
+	case TypeAccept:
+		return 8
 	case TypeDone:
 		return 2 + HashSize
 	case TypeOffer, TypeError:
