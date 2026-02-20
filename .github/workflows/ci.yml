@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run race tests (Linux only)
+        if: runner.os == 'Linux'
+        run: go test -race ./...
+
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61.0
+
+      - name: Run linter
+        run: golangci-lint run
+
+      - name: Build snapsync
+        run: >-
+          go build
+          -ldflags "-X snapsync/internal/buildinfo.Version=${{ github.ref_name }}
+          -X snapsync/internal/buildinfo.Commit=${{ github.sha }}
+          -X snapsync/internal/buildinfo.Date=${{ github.run_id }}"
+          ./cmd/snapsync
