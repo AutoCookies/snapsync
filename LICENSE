@@ -1,21 +1,67 @@
-MIT License
+Copyright (c) 2026 Pomai / Pomaieco
 
-Copyright (c) 2026 Pomai
+                NON-COMMERCIAL OPEN-SOURCE LICENSE (NC-OSL) v1.0
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Everyone is granted the rights to use, copy, modify, merge, and distribute
+this software and its source code, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+────────────────────────────────────────────────────────────────────────────
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+1. NON-COMMERCIAL USE ONLY
+
+   This software may not be used, in whole or in part, for any commercial
+   purpose. Commercial purpose includes, but is not limited to:
+
+   - Selling or licensing this software or derivative works for money or
+     other compensation.
+   - Using this software as part of a paid product, service, or SaaS
+     offering.
+   - Using this software internally within a for-profit company to
+     generate revenue or reduce costs.
+
+   If you wish to use this software commercially, you must obtain a
+   separate written commercial license from the copyright holder.
+
+────────────────────────────────────────────────────────────────────────────
+
+2. SHARE-ALIKE (COPYLEFT)
+
+   If you distribute, publish, or make available any derivative work,
+   modified version, or software that incorporates any part of this
+   software's source code, you MUST:
+
+   a. Make the complete corresponding source code of your derivative work
+      publicly available under this same license (NC-OSL v1.0) or a
+      compatible license that imposes equivalent non-commercial and
+      share-alike conditions.
+
+   b. Clearly state that the work is derived from this software and include
+      a link to the original source repository.
+
+   c. Include a copy of this license in all distributed copies.
+
+────────────────────────────────────────────────────────────────────────────
+
+3. ATTRIBUTION
+
+   All copies, modified versions, or derivative works must retain this
+   copyright notice and credit the original author:
+
+       Copyright (c) 2026 Pomai / Pomaieco
+       https://github.com/pomaieco/spriteforge
+
+────────────────────────────────────────────────────────────────────────────
+
+4. NO WARRANTY
+
+   THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR NON-INFRINGEMENT.
+   IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES,
+   OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+   ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+   OTHER DEALINGS IN THE SOFTWARE.
+
+────────────────────────────────────────────────────────────────────────────
+
+For commercial licensing inquiries, contact the copyright holder.
